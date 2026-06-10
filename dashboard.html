@@ -1,0 +1,191 @@
+﻿<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="UTF-8">
+<title>Open-Meteo Dashboard</title>
+<style>
+  *, *::before, *::after { box-sizing: border-box; }
+  body { font-family: 'Segoe UI', sans-serif; background: #0f172a; color: #e2e8f0; margin: 0; padding: 2rem; }
+  header { display: flex; align-items: baseline; gap: 1rem; margin-bottom: 0.25rem; }
+  h1 { color: #7dd3fc; margin: 0; font-size: 1.6rem; }
+  #clock { color: #475569; font-size: 0.85rem; }
+  p.sub { color: #475569; margin: 0.25rem 0 2rem; font-size: 0.85rem; }
+  .grid { display: flex; gap: 1.25rem; flex-wrap: wrap; margin-bottom: 2rem; }
+  .card { background: #1e293b; border-radius: 14px; padding: 1.5rem; flex: 1; min-width: 230px; border: 1px solid #1e3a5f; }
+  .card-head { display: flex; justify-content: space-between; align-items: flex-start; }
+  .city { font-size: 1rem; font-weight: 600; color: #94a3b8; }
+  .day-badge { font-size: 0.7rem; background: #0c2340; color: #7dd3fc; border-radius: 999px; padding: 2px 8px; }
+  .temp-row { display: flex; align-items: flex-end; gap: 0.5rem; margin: 0.75rem 0 0.5rem; }
+  .temp { font-size: 3.2rem; font-weight: 700; color: #f0f9ff; line-height: 1; }
+  .feels { font-size: 0.8rem; color: #64748b; margin-bottom: 0.2rem; }
+  .desc { font-size: 0.9rem; color: #7dd3fc; margin-bottom: 1rem; }
+  .stats { display: grid; grid-template-columns: 1fr 1fr; gap: 0.5rem 1rem; font-size: 0.8rem; }
+  .stat-label { color: #475569; }
+  .stat-val { color: #cbd5e1; font-weight: 500; }
+  .divider { border: none; border-top: 1px solid #1e3a5f; margin: 1rem 0 0.75rem; }
+  .qc-row { display: flex; align-items: center; gap: 0.5rem; font-size: 0.8rem; }
+  .dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
+  .dot-ok   { background: #22c55e; }
+  .dot-warn { background: #ef4444; }
+  .qc-ok   { color: #86efac; }
+  .qc-warn { color: #fca5a5; }
+  .last-update { color: #334155; font-size: 0.75rem; margin-top: 0.4rem; }
+
+  /* Forecast bar */
+  .forecast { margin-top: 2rem; }
+  .forecast h2 { color: #64748b; font-size: 0.85rem; font-weight: 600; text-transform: uppercase; letter-spacing: .05em; margin-bottom: 1rem; }
+  .fc-grid { display: flex; gap: 0.75rem; flex-wrap: wrap; }
+  .fc-card { background: #1e293b; border: 1px solid #1e3a5f; border-radius: 10px; padding: 0.75rem 1rem; text-align: center; flex: 1; min-width: 80px; }
+  .fc-day { font-size: 0.75rem; color: #64748b; margin-bottom: 0.4rem; }
+  .fc-temp { font-size: 1.1rem; font-weight: 700; color: #7dd3fc; }
+  .fc-range { font-size: 0.72rem; color: #475569; margin-top: 0.2rem; }
+  .fc-desc { font-size: 0.7rem; color: #64748b; margin-top: 0.3rem; }
+
+  .loading { color: #475569; font-style: italic; }
+</style>
+</head>
+<body>
+<header>
+  <h1>🌤 Open-Meteo Dashboard</h1>
+  <span id="clock"></span>
+</header>
+<p class="sub">Données en direct · contrôle qualité pipeline Airflow · rafraîchissement auto toutes les 30s</p>
+
+<div class="grid" id="grid"><p class="loading">Chargement…</p></div>
+
+<div class="forecast" id="forecast-section" style="display:none">
+  <h2>Prévisions 7 jours — Paris</h2>
+  <div class="fc-grid" id="fc-grid"></div>
+</div>
+
+<script>
+const CITIES = [
+  { name: "Paris",     lat: 48.8566, lon: 2.3522 },
+  { name: "Lyon",      lat: 45.7640, lon: 4.8357 },
+  { name: "Marseille", lat: 43.2965, lon: 5.3698 },
+];
+
+const WMO = {
+  0:"Ciel dégagé", 1:"Principalement dégagé", 2:"Partiellement nuageux",
+  3:"Couvert", 45:"Brouillard", 48:"Brouillard givrant", 51:"Bruine légère",
+  53:"Bruine modérée", 55:"Bruine forte", 61:"Pluie légère", 63:"Pluie modérée",
+  65:"Pluie forte", 71:"Neige légère", 73:"Neige modérée", 75:"Neige forte",
+  77:"Grésil", 80:"Averses légères", 81:"Averses modérées", 82:"Averses violentes",
+  85:"Averses de neige", 95:"Orage", 96:"Orage avec grêle", 99:"Orage violent"
+};
+
+const DAYS = ["Dim","Lun","Mar","Mer","Jeu","Ven","Sam"];
+
+function windDir(deg) {
+  const dirs = ["N","NE","E","SE","S","SO","O","NO"];
+  return dirs[Math.round(deg / 45) % 8];
+}
+
+function checkQuality(temp, wind, dir) {
+  if (temp < -50 || temp > 60) return { ok: false, msg: `Temp hors plage [-50, 60] : ${temp}°C` };
+  if (wind < 0   || wind > 300) return { ok: false, msg: `Vent hors plage [0, 300] : ${wind} km/h` };
+  if (dir  < 0   || dir  > 360) return { ok: false, msg: `Direction hors plage [0, 360] : ${dir}°` };
+  return { ok: true, msg: "Contrôle qualité OK" };
+}
+
+async function fetchCity(city) {
+  const url = `https://api.open-meteo.com/v1/forecast?latitude=${city.lat}&longitude=${city.lon}`
+    + `&current_weather=true`
+    + `&hourly=relativehumidity_2m,apparent_temperature,precipitation_probability,uv_index`
+    + `&forecast_days=1&timezone=Europe/Paris`;
+  const r = await fetch(url);
+  const d = await r.json();
+  const cw = d.current_weather;
+
+  // Prendre la valeur horaire la plus proche de maintenant
+  const now = new Date();
+  const hour = now.getHours();
+  const humidity = d.hourly?.relativehumidity_2m?.[hour] ?? "—";
+  const feelsLike = d.hourly?.apparent_temperature?.[hour] ?? "—";
+  const precipProb = d.hourly?.precipitation_probability?.[hour] ?? "—";
+  const uv = d.hourly?.uv_index?.[hour] ?? "—";
+
+  const qc = checkQuality(cw.temperature, cw.windspeed, cw.winddirection);
+  return { ...city, temp: cw.temperature, wind: cw.windspeed, dir: cw.winddirection,
+           code: cw.weathercode, desc: WMO[cw.weathercode] || "Inconnu",
+           isDay: cw.is_day, time: cw.time, humidity, feelsLike, precipProb, uv, qc };
+}
+
+async function fetchForecast() {
+  const url = `https://api.open-meteo.com/v1/forecast?latitude=48.8566&longitude=2.3522`
+    + `&daily=temperature_2m_max,temperature_2m_min,weathercode&timezone=Europe/Paris&forecast_days=7`;
+  const r = await fetch(url);
+  const d = await r.json();
+  return d.daily;
+}
+
+function renderCards(results) {
+  const grid = document.getElementById("grid");
+  grid.innerHTML = "";
+  results.forEach(c => {
+    const card = document.createElement("div");
+    card.className = "card";
+    card.innerHTML = `
+      <div class="card-head">
+        <span class="city">📍 ${c.name}</span>
+        <span class="day-badge">${c.isDay ? "☀️ Jour" : "🌙 Nuit"}</span>
+      </div>
+      <div class="temp-row">
+        <div class="temp">${c.temp}°C</div>
+        <div class="feels">Ressenti ${c.feelsLike}°C</div>
+      </div>
+      <div class="desc">${c.desc}</div>
+      <div class="stats">
+        <span class="stat-label">💧 Humidité</span>   <span class="stat-val">${c.humidity}%</span>
+        <span class="stat-label">💨 Vent</span>        <span class="stat-val">${c.wind} km/h ${windDir(c.dir)}</span>
+        <span class="stat-label">🌧 Précip.</span>     <span class="stat-val">${c.precipProb}%</span>
+        <span class="stat-label">☀️ UV</span>          <span class="stat-val">${c.uv}</span>
+        <span class="stat-label">🧭 Direction</span>   <span class="stat-val">${c.dir}°</span>
+        <span class="stat-label">🕐 Mesure</span>      <span class="stat-val">${c.time?.slice(11) ?? "—"}</span>
+      </div>
+      <hr class="divider">
+      <div class="qc-row">
+        <div class="dot ${c.qc.ok ? "dot-ok" : "dot-warn"}"></div>
+        <span class="${c.qc.ok ? "qc-ok" : "qc-warn"}">${c.qc.msg}</span>
+      </div>`;
+    grid.appendChild(card);
+  });
+}
+
+function renderForecast(daily) {
+  const section = document.getElementById("forecast-section");
+  const grid = document.getElementById("fc-grid");
+  section.style.display = "block";
+  grid.innerHTML = "";
+  daily.time.forEach((dateStr, i) => {
+    const d = new Date(dateStr);
+    const card = document.createElement("div");
+    card.className = "fc-card";
+    card.innerHTML = `
+      <div class="fc-day">${DAYS[d.getDay()]}<br>${d.getDate()}/${d.getMonth()+1}</div>
+      <div class="fc-temp">${daily.temperature_2m_max[i]}°</div>
+      <div class="fc-range">${daily.temperature_2m_min[i]}° / ${daily.temperature_2m_max[i]}°</div>
+      <div class="fc-desc">${WMO[daily.weathercode[i]] || ""}</div>`;
+    grid.appendChild(card);
+  });
+}
+
+function updateClock() {
+  document.getElementById("clock").textContent =
+    new Date().toLocaleTimeString("fr-FR", { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+}
+
+async function render() {
+  const results = await Promise.all(CITIES.map(fetchCity));
+  renderCards(results);
+  const daily = await fetchForecast();
+  renderForecast(daily);
+}
+
+setInterval(updateClock, 1000);
+updateClock();
+render();
+setInterval(render, 30000);
+</script>
+</body>
+</html>
